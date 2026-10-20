@@ -1,0 +1,60 @@
+name: Stale TODO Finder
+description: Find TODO, FIXME and HACK comments that have been sitting in your code too long, using git blame. Job summary, annotations and outputs.
+author: acus9345
+branding:
+  icon: clock
+  color: orange
+
+inputs:
+  days:
+    description: A TODO is stale when its line was last changed at least this many days ago.
+    default: "90"
+  tags:
+    description: Keywords to look for, comma-separated. Matched case-sensitively as whole words.
+    default: "TODO,FIXME,HACK,XXX"
+  include:
+    description: Only search files matching these globs (comma- or newline-separated git pathspec globs, like "src/**"). Empty searches every tracked file.
+    default: ""
+  exclude:
+    description: Skip files matching these globs, like "vendor/**,**/*.min.js".
+    default: ""
+  only-changed:
+    description: On pull requests, only report TODOs in files the pull request changed.
+    default: "false"
+  comments-only:
+    description: Only count keywords inside comments (after //, #, /*, --, <!-- and so on). Set to false to match anywhere.
+    default: "true"
+  fail-on-stale:
+    description: Fail the step when any TODO is stale.
+    default: "false"
+  max-stale:
+    description: Fail the step when there are more stale TODOs than this. Empty never fails.
+    default: ""
+  max-annotations:
+    description: Most stale TODOs to annotate in the code (GitHub shows up to 10 warnings per step).
+    default: "10"
+  summary:
+    description: Write a report to the job summary.
+    default: "true"
+  max-rows:
+    description: Most rows in the report table.
+    default: "50"
+  path:
+    description: Where the repository is checked out, relative to the workspace.
+    default: "."
+
+outputs:
+  total:
+    description: Number of TODOs found.
+  stale:
+    description: Number of stale TODOs.
+  oldest-days:
+    description: Age in days of the oldest TODO.
+  markdown:
+    description: The report as Markdown, for posting as a comment or issue.
+  json:
+    description: 'The stale TODOs as a JSON array of {file, line, tag, text, owner, author, commit, date, ageDays}.'
+
+runs:
+  using: node24
+  main: dist/index.js

@@ -1,0 +1,42 @@
+{
+  "name": "stale-todo",
+  "version": "1.0.0",
+  "description": "GitHub Action that finds TODO, FIXME and HACK comments older than N days with git blame, and reports them in the job summary, as annotations and as outputs.",
+  "keywords": [
+    "github-action",
+    "todo",
+    "fixme",
+    "technical-debt",
+    "tech-debt",
+    "git-blame",
+    "code-quality",
+    "stale"
+  ],
+  "homepage": "https://github.com/acus9345/stale-todo#readme",
+  "bugs": {
+    "url": "https://github.com/acus9345/stale-todo/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/acus9345/stale-todo.git"
+  },
+  "license": "MIT",
+  "author": "acus9345 <acus9345@gmail.com>",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "prelint": "npm run build",
+    "lint": "tsc -p tsconfig.json",
+    "pretest": "npm run build",
+    "test": "node --test \"test/*.test.ts\""
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^7.0.2"
+  }
+}
