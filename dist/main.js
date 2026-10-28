@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync, readFileSync } from "node:fs";
 import { posix, resolve } from "node:path";
+import { upsertComment, upsertIssue } from "./github.js";
 import { formatAge, renderMarkdown } from "./report.js";
-import { git, scan } from "./scan.js";
+import { git, scanReport } from "./scan.js";
 /** Read an action input the way the runner passes it: `INPUT_<NAME>` with spaces as underscores. */
 export function input(env, name, fallback = "") {
     return (env[`INPUT_${name.replace(/ /g, "_").toUpperCase()}`] ?? fallback).trim() || fallback;
@@ -23,13 +24,13 @@ function setOutput(env, name, value) {
     const delimiter = `ghadelimiter_${randomUUID()}`;
     appendFileSync(env.GITHUB_OUTPUT, `${name}<<${delimiter}\n${value}\n${delimiter}\n`);
 }
-/** The pull request's base commit, from the event payload. */
-function pullRequestBase(env) {
+/** The pull request in the event payload, if there is one. */
+function pullRequest(env) {
     if (!env.GITHUB_EVENT_PATH)
         return undefined;
     try {
         const event = JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, "utf8"));
-        return event.pull_request?.base?.sha;
+        return event.pull_request;
     }
     catch {
         return undefined;
@@ -51,12 +52,17 @@ export async function run(env, io = { log: (l) => console.log(l) }) {
     const annotations = Math.floor(positiveNumber("max-annotations", input(env, "max-annotations", "10")));
     const summary = bool(input(env, "summary"), true);
     const maxRows = Math.floor(positiveNumber("max-rows", input(env, "max-rows", "50")));
+    const skipVendored = bool(input(env, "skip-vendored"), true);
+    const comment = bool(input(env, "comment"), false);
+    const issue = bool(input(env, "issue"), false);
+    const issueTitle = input(env, "issue-title", "Stale TODOs");
+    const issueLabels = list(input(env, "issue-labels"));
     if ((await git(["rev-parse", "--is-shallow-repository"], cwd)).trim() === "true") {
         io.log("::warning title=stale-todo::This is a shallow clone, so every line looks as new as the latest commit. Add `fetch-depth: 0` to actions/checkout to get real ages.");
     }
     let files;
     if (onlyChanged) {
-        const base = pullRequestBase(env);
+        const base = pullRequest(env)?.base?.sha;
         if (!base) {
             io.log("::notice title=stale-todo::only-changed works on pull_request events; checking every file.");
         }
@@ -69,7 +75,7 @@ export async function run(env, io = { log: (l) => console.log(l) }) {
             }
         }
     }
-    const todos = await scan({ cwd, tags, include, exclude, ...(files ? { files } : {}), commentsOnly, ...(io.now !== undefined ? { now: io.now } : {}) });
+    const { todos, ignored, skippedFiles } = await scanReport({ cwd, tags, include, exclude, ...(files ? { files } : {}), commentsOnly, skipVendored, ...(io.now !== undefined ? { now: io.now } : {}) });
     const stale = todos.filter((t) => t.ageDays >= days);
     const server = env.GITHUB_SERVER_URL ?? "https://github.com";
     const repo = env.GITHUB_REPOSITORY;
@@ -86,9 +92,58 @@ export async function run(env, io = { log: (l) => console.log(l) }) {
     setOutput(env, "total", String(todos.length));
     setOutput(env, "stale", String(stale.length));
     setOutput(env, "oldest-days", String(todos[0]?.ageDays ?? 0));
+    setOutput(env, "ignored", String(ignored));
     setOutput(env, "markdown", markdown);
     setOutput(env, "json", JSON.stringify(stale.map(({ file, line, tag, text, owner, author, commit, date, ageDays }) => ({ file, line, tag, text, owner, author, commit, date: new Date(date).toISOString(), ageDays }))));
-    io.log(`Found ${todos.length} TODO${todos.length === 1 ? "" : "s"}, ${stale.length} older than ${days} days.`);
+    if (comment || issue) {
+        const token = input(env, "token") || env.GITHUB_TOKEN || "";
+        if (!token || !repo) {
+            io.log("::warning title=stale-todo::Posting a comment or issue needs the `token` input and GITHUB_REPOSITORY.");
+        }
+        else {
+            const gh = { api: env.GITHUB_API_URL ?? "https://api.github.com", token, repo, fetch: io.fetch ?? fetch };
+            const runUrl = env.GITHUB_RUN_ID ? `${server}/${repo}/actions/runs/${env.GITHUB_RUN_ID}` : undefined;
+            const footer = `\n\n<sub>Updated by [stale-todo](https://github.com/acus9345/stale-todo)${runUrl ? ` in [this run](${runUrl})` : ""}.</sub>`;
+            const report = markdown + footer;
+            const hasStale = stale.length > 0;
+            if (comment) {
+                const pr = pullRequest(env)?.number;
+                if (pr === undefined) {
+                    io.log("::notice title=stale-todo::comment works on pull_request events; skipping the comment.");
+                }
+                else {
+                    try {
+                        const result = await upsertComment(gh, pr, report, hasStale);
+                        if (result.action !== "skipped") {
+                            setOutput(env, "comment-url", result.url);
+                            io.log(`${result.action === "created" ? "Commented on" : "Updated the comment on"} pull request #${pr}: ${result.url}`);
+                        }
+                    }
+                    catch (error) {
+                        io.log(`::warning title=stale-todo::Could not comment on pull request #${pr}. Give the job \`permissions: pull-requests: write\`. (${escapeData(error.message)})`);
+                    }
+                }
+            }
+            if (issue) {
+                try {
+                    const result = await upsertIssue(gh, { title: issueTitle, labels: issueLabels, report, hasStale });
+                    if (result.action !== "skipped") {
+                        setOutput(env, "issue-url", result.url);
+                        setOutput(env, "issue-number", String(result.number));
+                        io.log(`${result.action[0].toUpperCase()}${result.action.slice(1)} issue #${result.number}: ${result.url}`);
+                    }
+                }
+                catch (error) {
+                    io.log(`::warning title=stale-todo::Could not update the tracking issue. Give the job \`permissions: issues: write\`. (${escapeData(error.message)})`);
+                }
+            }
+        }
+    }
+    const extra = [
+        ignored > 0 ? `${ignored} ignored by comment` : "",
+        skippedFiles.length > 0 ? `${skippedFiles.length} vendored or generated file${skippedFiles.length === 1 ? "" : "s"} skipped` : "",
+    ].filter(Boolean);
+    io.log(`Found ${todos.length} TODO${todos.length === 1 ? "" : "s"}, ${stale.length} older than ${days} days.${extra.length > 0 ? ` (${extra.join(", ")})` : ""}`);
     if (failOnStale && stale.length > 0) {
         io.log(`::error title=stale-todo::${stale.length} TODO${stale.length === 1 ? " is" : "s are"} older than ${days} days.`);
         return 1;

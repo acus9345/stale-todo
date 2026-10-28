@@ -42,6 +42,24 @@ inputs:
   path:
     description: Where the repository is checked out, relative to the workspace.
     default: "."
+  skip-vendored:
+    description: Skip vendored and generated files (linguist-vendored / linguist-generated in .gitattributes, node_modules/, vendor/, third_party/, *.min.js, and files with an @generated or DO NOT EDIT header).
+    default: "true"
+  comment:
+    description: On pull requests, keep one comment with the report, updated on each push. No comment is posted while nothing is stale. Needs pull-requests write permission.
+    default: "false"
+  issue:
+    description: Keep one open issue with the report. It is created when TODOs go stale, updated on later runs, and closed once nothing is stale. Needs issues write permission.
+    default: "false"
+  issue-title:
+    description: Title of the tracking issue.
+    default: Stale TODOs
+  issue-labels:
+    description: Labels for a new tracking issue, comma-separated.
+    default: ""
+  token:
+    description: Token for posting the comment and issue.
+    default: ${{ github.token }}
 
 outputs:
   total:
@@ -52,6 +70,14 @@ outputs:
     description: Age in days of the oldest TODO.
   markdown:
     description: The report as Markdown, for posting as a comment or issue.
+  ignored:
+    description: Number of TODOs skipped by a stale-todo-ignore comment.
+  comment-url:
+    description: URL of the pull request comment, when one was posted or updated.
+  issue-url:
+    description: URL of the tracking issue, when one was created, updated or closed.
+  issue-number:
+    description: Number of the tracking issue.
   json:
     description: 'The stale TODOs as a JSON array of {file, line, tag, text, owner, author, commit, date, ageDays}.'
 

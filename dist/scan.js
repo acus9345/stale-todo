@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 /** Runs git and returns stdout. Exit code 1 is allowed (git grep's "no matches"). */
 export function git(args, cwd, allowExit1 = false) {
@@ -95,14 +95,57 @@ async function pool(items, limit, fn) {
 }
 const DAY = 24 * 60 * 60 * 1000;
 const UNCOMMITTED = /^0{40}$/;
+/** Paths that are almost always vendored or generated. */
+const VENDORED_PATH = /(?:^|\/)(?:node_modules|bower_components|vendor|vendored|third[_-]party|Pods|Carthage)\/|\.min\.(?:js|mjs|cjs|css)$|\.(?:pb|g|generated)\.\w+$/;
+/** Headers code generators write at the top of a file. */
+const GENERATED_HEADER = /@generated\b|\bDO NOT EDIT\b|\bauto-?generated\b/i;
+/** Which of `files` are vendored or generated: by `linguist-vendored` / `linguist-generated` in .gitattributes, path, or header. */
+export async function vendoredFiles(cwd, files) {
+    const attrs = new Map();
+    for (let i = 0; i < files.length; i += 200) {
+        const out = await git(["check-attr", "-z", "linguist-vendored", "linguist-generated", "--", ...files.slice(i, i + 200)], cwd).catch(() => "");
+        const parts = out.split("\0");
+        for (let j = 0; j + 2 < parts.length; j += 3) {
+            const [file, , value] = [parts[j], parts[j + 1], parts[j + 2]];
+            if (value === "set" || value === "true")
+                attrs.set(file, true);
+            else if ((value === "unset" || value === "false") && !attrs.get(file))
+                attrs.set(file, false);
+        }
+    }
+    const skipped = new Set();
+    for (const file of files) {
+        const attr = attrs.get(file);
+        if (attr === false)
+            continue;
+        if (attr === true || VENDORED_PATH.test(file) || hasGeneratedHeader(join(cwd, file)))
+            skipped.add(file);
+    }
+    return skipped;
+}
+function hasGeneratedHeader(path) {
+    try {
+        const head = readFileSync(path, "utf8").slice(0, 2000).split("\n").slice(0, 5).join("\n");
+        return GENERATED_HEADER.test(head);
+    }
+    catch {
+        return false;
+    }
+}
+const IGNORE = "stale-todo-ignore";
 /** Finds TODO-style comments with git grep and dates each one with git blame. Oldest first. */
 export async function scan(options) {
-    const { cwd, tags, commentsOnly = true } = options;
+    return (await scanReport(options)).todos;
+}
+/** Like {@link scan}, plus what was ignored or skipped. */
+export async function scanReport(options) {
+    const { cwd, tags, commentsOnly = true, skipVendored = true } = options;
     const now = options.now ?? Date.now();
+    const empty = { todos: [], ignored: 0, skippedFiles: [] };
     if (tags.length === 0)
-        return [];
+        return empty;
     if (options.files && options.files.length === 0)
-        return [];
+        return empty;
     const pathspecs = [
         ...(options.files ?? []).map((f) => `:(literal)${f}`),
         ...(options.include ?? []).map((g) => `:(glob)${g}`),
@@ -111,16 +154,38 @@ export async function scan(options) {
     if (pathspecs.length > 0 && pathspecs.every((p) => p.startsWith(":(glob,exclude)")))
         pathspecs.unshift(".");
     const pattern = tags.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
-    const out = await git(["grep", "-n", "-z", "-I", "--no-color", "-w", "-E", "-e", pattern, "--", ...pathspecs], cwd, true);
+    const [out, ignoreOut] = await Promise.all([
+        git(["grep", "-n", "-z", "-I", "--no-color", "-w", "-E", "-e", pattern, "--", ...pathspecs], cwd, true),
+        git(["grep", "-n", "-z", "-I", "--no-color", "-F", "-e", IGNORE, "--", ...pathspecs], cwd, true),
+    ]);
+    // `stale-todo-ignore` skips its own line, `-next-line` the line after it, `-file` the whole file.
+    const ignoredLines = new Set();
+    const ignoredFiles = new Set();
+    for (const hit of parseGrep(ignoreOut)) {
+        if (hit.content.includes(`${IGNORE}-file`))
+            ignoredFiles.add(hit.file);
+        else if (hit.content.includes(`${IGNORE}-next-line`))
+            ignoredLines.add(`${hit.line + 1}:${hit.file}`);
+        else
+            ignoredLines.add(`${hit.line}:${hit.file}`);
+    }
+    let ignored = 0;
     const byFile = new Map();
     for (const hit of parseGrep(out)) {
         const todo = parseTodo(hit.content, tags, commentsOnly);
         if (!todo)
             continue;
+        if (ignoredFiles.has(hit.file) || ignoredLines.has(`${hit.line}:${hit.file}`)) {
+            ignored++;
+            continue;
+        }
         const list = byFile.get(hit.file) ?? [];
         list.push({ ...hit, ...todo });
         byFile.set(hit.file, list);
     }
+    const skippedFiles = skipVendored ? [...(await vendoredFiles(cwd, [...byFile.keys()]))] : [];
+    for (const file of skippedFiles)
+        byFile.delete(file);
     const ignoreRevs = existsSync(join(cwd, ".git-blame-ignore-revs")) ? ["--ignore-revs-file", ".git-blame-ignore-revs"] : [];
     const files = [...byFile.keys()];
     const blames = await pool(files, 8, async (file) => {
@@ -153,5 +218,6 @@ export async function scan(options) {
             });
         }
     });
-    return todos.sort((a, b) => a.date - b.date || a.file.localeCompare(b.file) || a.line - b.line);
+    todos.sort((a, b) => a.date - b.date || a.file.localeCompare(b.file) || a.line - b.line);
+    return { todos, ignored, skippedFiles: skippedFiles.sort() };
 }

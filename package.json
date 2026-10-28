@@ -1,6 +1,6 @@
 {
   "name": "stale-todo",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "GitHub Action that finds TODO, FIXME and HACK comments older than N days with git blame, and reports them in the job summary, as annotations and as outputs.",
   "keywords": [
     "github-action",

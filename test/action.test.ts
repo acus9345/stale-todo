@@ -111,11 +111,12 @@ describe("in a git repository", () => {
       [
         ["src/old.ts", 1, "TODO", "Ada", 1009],
         ["src/old.ts", 2, "FIXME", "Ada", 1009],
-        ["vendor/lib.js", 1, "TODO", "Ada", 1009],
         ["src/new.py", 1, "TODO", "Grace", 19],
       ],
     );
     assert.equal(todos[1]!.owner, "bob");
+    const all = await scan({ cwd: repo, tags: TAGS, now: NOW, skipVendored: false });
+    assert.ok(all.some((t) => t.file === "vendor/lib.js"));
   });
 
   it("respects include, exclude and file lists", async () => {

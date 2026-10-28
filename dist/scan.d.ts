@@ -32,6 +32,16 @@ export interface ScanOptions {
     commentsOnly?: boolean;
     /** "Now", for computing ages. Default `Date.now()`. */
     now?: number;
+    /** Skip vendored and generated files. Default `true`. */
+    skipVendored?: boolean;
+}
+export interface ScanResult {
+    /** The TODOs found, oldest first. */
+    todos: Todo[];
+    /** TODOs left out by a `stale-todo-ignore` comment. */
+    ignored: number;
+    /** Files with TODOs that were skipped as vendored or generated. */
+    skippedFiles: string[];
 }
 /** Runs git and returns stdout. Exit code 1 is allowed (git grep's "no matches"). */
 export declare function git(args: readonly string[], cwd: string, allowExit1?: boolean): Promise<string>;
@@ -58,5 +68,9 @@ export interface BlameLine {
 }
 /** Parses `git blame --line-porcelain` output into a map of final line number → commit info. */
 export declare function parsePorcelain(output: string): Map<number, BlameLine>;
+/** Which of `files` are vendored or generated: by `linguist-vendored` / `linguist-generated` in .gitattributes, path, or header. */
+export declare function vendoredFiles(cwd: string, files: readonly string[]): Promise<Set<string>>;
 /** Finds TODO-style comments with git grep and dates each one with git blame. Oldest first. */
 export declare function scan(options: ScanOptions): Promise<Todo[]>;
+/** Like {@link scan}, plus what was ignored or skipped. */
+export declare function scanReport(options: ScanOptions): Promise<ScanResult>;
