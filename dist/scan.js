@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readSync } from "node:fs";
 import { join } from "node:path";
 /** Runs git and returns stdout. Exit code 1 is allowed (git grep's "no matches"). */
 export function git(args, cwd, allowExit1 = false) {
@@ -17,7 +17,7 @@ export function git(args, cwd, allowExit1 = false) {
 /** Parses `git grep -n -z` output: `path\0line\0content` (or `path\0line:content` on older git). */
 export function parseGrep(output) {
     const hits = [];
-    for (const row of output.split("\n")) {
+    for (const row of output.split(/\r?\n/)) {
         if (!row)
             continue;
         const [file, rest = "", ...more] = row.split("\0");
@@ -29,6 +29,8 @@ export function parseGrep(output) {
         }
         else {
             const colon = rest.indexOf(":");
+            if (colon === -1)
+                continue;
             lineNo = rest.slice(0, colon);
             content = rest.slice(colon + 1);
         }
@@ -42,26 +44,30 @@ export function parseGrep(output) {
 const COMMENT_BEFORE = /(?:\/\/|\/\*|^\s*\*|#|--|<!--|;|%|^\s*'|^\s*REM\b|\{#|\{\{!|"""|''')/i;
 /** Finds the first keyword in a line and pulls out its owner and text. */
 export function parseTodo(content, tags, commentsOnly = true) {
+    if (tags.length === 0)
+        return undefined;
+    const line = content.replace(/\r$/, "");
     const escaped = tags.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
-    const re = new RegExp(`(?<![\\w$])(${escaped})(?![\\w$])(?:\\s*\\(([^)]*)\\))?\\s*[:\\-–—]?\\s*(.*)$`);
-    const m = re.exec(content);
-    if (!m)
-        return undefined;
-    if (commentsOnly && !COMMENT_BEFORE.test(content.slice(0, m.index)))
-        return undefined;
-    const text = m[3]
-        .replace(/\s*(?:\*\/|-->|#\}|\}\}|"""|''')\s*$/, "")
-        .trim();
-    const owner = m[2]?.trim().replace(/^@/, "") || undefined;
-    return { tag: m[1], text, owner };
+    const tagRe = new RegExp(`(?<![\\w$])(${escaped})(?![\\w$])`, "g");
+    for (let m = tagRe.exec(line); m; m = tagRe.exec(line)) {
+        if (commentsOnly && !COMMENT_BEFORE.test(line.slice(0, m.index)))
+            continue;
+        const tail = /^(?:\s*\(([^)]*)\))?\s*[:\-–—]?\s*(.*)$/.exec(line.slice(m.index + m[0].length));
+        const text = tail[2]
+            .replace(/\s*(?:\*\/|-->|#\}|--\}\}|\}\}|"""|''')\s*$/, "")
+            .trim();
+        const owner = tail[1]?.trim().replace(/^@/, "") || undefined;
+        return { tag: m[1], text, owner };
+    }
+    return undefined;
 }
 /** Parses `git blame --line-porcelain` output into a map of final line number → commit info. */
 export function parsePorcelain(output) {
     const lines = new Map();
     let current;
     for (const row of output.split("\n")) {
-        if (current === undefined || /^[0-9a-f]{40} \d+ \d+/.test(row)) {
-            const header = /^([0-9a-f]{40}) \d+ (\d+)/.exec(row);
+        if (current === undefined || /^[0-9a-f]{40,64} \d+ \d+/.test(row)) {
+            const header = /^([0-9a-f]{40,64}) \d+ (\d+)/.exec(row);
             if (header)
                 current = { line: Number(header[2]), info: { commit: header[1] } };
             continue;
@@ -94,7 +100,7 @@ async function pool(items, limit, fn) {
     return results;
 }
 const DAY = 24 * 60 * 60 * 1000;
-const UNCOMMITTED = /^0{40}$/;
+const UNCOMMITTED = /^0+$/;
 /** Paths that are almost always vendored or generated. */
 const VENDORED_PATH = /(?:^|\/)(?:node_modules|bower_components|vendor|vendored|third[_-]party|Pods|Carthage)\/|\.min\.(?:js|mjs|cjs|css)$|\.(?:pb|g|generated)\.\w+$/;
 /** Headers code generators write at the top of a file. */
@@ -102,8 +108,8 @@ const GENERATED_HEADER = /@generated\b|\bDO NOT EDIT\b|\bauto-?generated\b/i;
 /** Which of `files` are vendored or generated: by `linguist-vendored` / `linguist-generated` in .gitattributes, path, or header. */
 export async function vendoredFiles(cwd, files) {
     const attrs = new Map();
-    for (let i = 0; i < files.length; i += 200) {
-        const out = await git(["check-attr", "-z", "linguist-vendored", "linguist-generated", "--", ...files.slice(i, i + 200)], cwd).catch(() => "");
+    for (let i = 0; i < files.length; i += 50) {
+        const out = await git(["check-attr", "-z", "linguist-vendored", "linguist-generated", "--", ...files.slice(i, i + 50)], cwd).catch(() => "");
         const parts = out.split("\0");
         for (let j = 0; j + 2 < parts.length; j += 3) {
             const [file, , value] = [parts[j], parts[j + 1], parts[j + 2]];
@@ -125,8 +131,16 @@ export async function vendoredFiles(cwd, files) {
 }
 function hasGeneratedHeader(path) {
     try {
-        const head = readFileSync(path, "utf8").slice(0, 2000).split("\n").slice(0, 5).join("\n");
-        return GENERATED_HEADER.test(head);
+        const fd = openSync(path, "r");
+        try {
+            const buf = Buffer.alloc(4096);
+            const n = readSync(fd, buf, 0, buf.length, 0);
+            const head = buf.toString("utf8", 0, n).slice(0, 2000).split(/\r?\n/).slice(0, 5).join("\n");
+            return GENERATED_HEADER.test(head);
+        }
+        finally {
+            closeSync(fd);
+        }
     }
     catch {
         return false;
@@ -146,18 +160,34 @@ export async function scanReport(options) {
         return empty;
     if (options.files && options.files.length === 0)
         return empty;
-    const pathspecs = [
-        ...(options.files ?? []).map((f) => `:(literal)${f}`),
-        ...(options.include ?? []).map((g) => `:(glob)${g}`),
-        ...(options.exclude ?? []).map((g) => `:(glob,exclude)${g}`),
-    ];
-    if (pathspecs.length > 0 && pathspecs.every((p) => p.startsWith(":(glob,exclude)")))
-        pathspecs.unshift(".");
+    let targetFiles = options.files;
+    if (targetFiles && options.include && options.include.length > 0) {
+        const lsOut = await git(["ls-files", "-z", "--", ...options.include.map((g) => `:(glob)${g}`)], cwd);
+        const allowed = new Set(lsOut.split("\0").filter(Boolean));
+        targetFiles = targetFiles.filter((f) => allowed.has(f));
+        if (targetFiles.length === 0)
+            return empty;
+    }
+    const excludeSpecs = (options.exclude ?? []).map((g) => `:(glob,exclude)${g}`);
+    const pathspecBatches = [];
+    if (targetFiles) {
+        for (let i = 0; i < targetFiles.length; i += 100) {
+            pathspecBatches.push([...targetFiles.slice(i, i + 100).map((f) => `:(literal)${f}`), ...excludeSpecs]);
+        }
+    }
+    else {
+        const pathspecs = [...(options.include ?? []).map((g) => `:(glob)${g}`), ...excludeSpecs];
+        if (pathspecs.length > 0 && pathspecs.every((p) => p.startsWith(":(glob,exclude)")))
+            pathspecs.unshift(".");
+        pathspecBatches.push(pathspecs);
+    }
     const pattern = tags.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
-    const [out, ignoreOut] = await Promise.all([
+    const grepChunks = await Promise.all(pathspecBatches.map((pathspecs) => Promise.all([
         git(["grep", "-n", "-z", "-I", "--no-color", "-w", "-E", "-e", pattern, "--", ...pathspecs], cwd, true),
         git(["grep", "-n", "-z", "-I", "--no-color", "-F", "-e", IGNORE, "--", ...pathspecs], cwd, true),
-    ]);
+    ])));
+    const out = grepChunks.map(([hits]) => hits).join("\n");
+    const ignoreOut = grepChunks.map(([, ignores]) => ignores).join("\n");
     // `stale-todo-ignore` skips its own line, `-next-line` the line after it, `-file` the whole file.
     const ignoredLines = new Set();
     const ignoredFiles = new Set();
@@ -189,9 +219,16 @@ export async function scanReport(options) {
     const ignoreRevs = existsSync(join(cwd, ".git-blame-ignore-revs")) ? ["--ignore-revs-file", ".git-blame-ignore-revs"] : [];
     const files = [...byFile.keys()];
     const blames = await pool(files, 8, async (file) => {
-        const ranges = byFile.get(file).flatMap((h) => ["-L", `${h.line},${h.line}`]);
+        const hits = byFile.get(file);
+        const blamed = new Map();
         try {
-            return parsePorcelain(await git(["blame", "--line-porcelain", "-w", "-M", ...ignoreRevs, ...ranges, "--", file], cwd));
+            for (let i = 0; i < hits.length; i += 100) {
+                const ranges = hits.slice(i, i + 100).flatMap((h) => ["-L", `${h.line},${h.line}`]);
+                const chunk = parsePorcelain(await git(["blame", "--line-porcelain", "-w", "-M", ...ignoreRevs, ...ranges, "--", file], cwd));
+                for (const [line, info] of chunk)
+                    blamed.set(line, info);
+            }
+            return blamed;
         }
         catch {
             // Untracked or unreadable: treat every line as new.

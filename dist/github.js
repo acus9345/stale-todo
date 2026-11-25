@@ -2,7 +2,7 @@
 export const COMMENT_MARKER = "<!-- stale-todo:comment -->";
 export const ISSUE_MARKER = "<!-- stale-todo:issue -->";
 async function call(gh, method, path, body) {
-    const res = await gh.fetch(`${gh.api}${path}`, {
+    const res = await gh.fetch(`${gh.api.replace(/\/+$/, "")}${path}`, {
         method,
         headers: {
             accept: "application/vnd.github+json",

@@ -82,7 +82,7 @@ export async function run(env: NodeJS.ProcessEnv, io: RunIO = { log: (l) => cons
       io.log("::notice title=stale-todo::only-changed works on pull_request events; checking every file.");
     } else {
       try {
-        files = (await git(["diff", "--name-only", "--diff-filter=AMR", `${base}...HEAD`], cwd)).split("\n").filter(Boolean);
+        files = (await git(["diff", "--name-only", "-z", "--relative", "--diff-filter=AMR", `${base}...HEAD`], cwd)).split("\0").filter(Boolean);
       } catch (error) {
         throw new Error(`Could not diff against the pull request base. Use \`fetch-depth: 0\` with actions/checkout. (${(error as Error).message})`);
       }
@@ -92,11 +92,12 @@ export async function run(env: NodeJS.ProcessEnv, io: RunIO = { log: (l) => cons
   const { todos, ignored, skippedFiles } = await scanReport({ cwd, tags, include, exclude, ...(files ? { files } : {}), commentsOnly, skipVendored, ...(io.now !== undefined ? { now: io.now } : {}) });
   const stale = todos.filter((t) => t.ageDays >= days);
 
-  const server = env.GITHUB_SERVER_URL ?? "https://github.com";
+  const server = (env.GITHUB_SERVER_URL || "https://github.com").replace(/\/+$/, "");
   const repo = env.GITHUB_REPOSITORY;
   const sha = env.GITHUB_SHA;
+  const encodeSegment = (s: string) => encodeURIComponent(s).replace(/[()]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
   const link = (t: Todo) =>
-    repo && sha ? `${server}/${repo}/blob/${sha}/${t.file.split("/").map(encodeURIComponent).join("/")}#L${t.line}` : undefined;
+    repo && sha ? `${server}/${repo}/blob/${sha}/${t.file.split("/").map(encodeSegment).join("/")}#L${t.line}` : undefined;
   const markdown = renderMarkdown(stale, { days, total: todos.length, link, maxRows });
 
   for (const t of stale.slice(0, annotations)) {
@@ -118,7 +119,7 @@ export async function run(env: NodeJS.ProcessEnv, io: RunIO = { log: (l) => cons
     if (!token || !repo) {
       io.log("::warning title=stale-todo::Posting a comment or issue needs the `token` input and GITHUB_REPOSITORY.");
     } else {
-      const gh: GitHub = { api: env.GITHUB_API_URL ?? "https://api.github.com", token, repo, fetch: io.fetch ?? fetch };
+      const gh: GitHub = { api: env.GITHUB_API_URL || "https://api.github.com", token, repo, fetch: io.fetch ?? fetch };
       const runUrl = env.GITHUB_RUN_ID ? `${server}/${repo}/actions/runs/${env.GITHUB_RUN_ID}` : undefined;
       const footer = `\n\n<sub>Updated by [stale-todo](https://github.com/acus9345/stale-todo)${runUrl ? ` in [this run](${runUrl})` : ""}.</sub>`;
       const report = markdown + footer;

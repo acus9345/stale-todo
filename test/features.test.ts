@@ -233,4 +233,15 @@ describe("comment and issue", () => {
     await run({ ...env, INPUT_ISSUE: "true", GITHUB_TOKEN: "" }, { log: (l) => logs.push(l), now: NOW, fetch: fakeGitHub().fetch });
     assert.ok(logs.some((l) => l.includes("needs the `token` input")));
   });
+
+  it("normalizes trailing slashes in GITHUB_API_URL and empty GITHUB_SERVER_URL", async () => {
+    const gh = fakeGitHub();
+    await run(
+      { ...baseEnv(), GITHUB_API_URL: "https://api.github.com/", GITHUB_SERVER_URL: "", INPUT_COMMENT: "true", INPUT_DAYS: "90" },
+      { log: () => {}, now: NOW, fetch: gh.fetch },
+    );
+    assert.equal(gh.comments.length, 1);
+    assert.match(gh.comments[0]!.body, /https:\/\/github\.com\/acme\/app\/blob\/abc\/a\.ts#L1/);
+    assert.deepEqual(gh.requests, ["GET /repos/acme/app/issues/7/comments", "POST /repos/acme/app/issues/7/comments"]);
+  });
 });

@@ -27,6 +27,10 @@ describe("parseTodo()", () => {
     assert.equal(parseTodo("TODO list app", TAGS), undefined);
     assert.equal(parseTodo("// TODOS and TODO_ITEMS", TAGS), undefined);
     assert.equal(parseTodo("TODO list app", TAGS, false)!.text, "list app");
+    assert.deepEqual(parseTodo('const status = "TODO"; // TODO: real todo', TAGS), { tag: "TODO", text: "real todo", owner: undefined });
+    assert.deepEqual(parseTodo("// TODO: windows line\r", TAGS), { tag: "TODO", text: "windows line", owner: undefined });
+    assert.deepEqual(parseTodo("{{!-- TODO: hbs --}} ", TAGS), { tag: "TODO", text: "hbs", owner: undefined });
+    assert.equal(parseTodo("// TODO: x", []), undefined);
   });
 });
 
@@ -36,7 +40,7 @@ describe("parsers", () => {
       { file: "src/a.ts", line: 12, content: "// TODO x" },
       { file: "b:c.py", line: 3, content: "# FIXME" },
     ]);
-    assert.deepEqual(parseGrep("a.ts\x007:// TODO: y\n"), [{ file: "a.ts", line: 7, content: "// TODO: y" }]);
+    assert.deepEqual(parseGrep("a.ts\x007:// TODO: y\r\n"), [{ file: "a.ts", line: 7, content: "// TODO: y" }]);
   });
 
   it("parses git blame --line-porcelain output", () => {
@@ -126,6 +130,9 @@ describe("in a git repository", () => {
     assert.deepEqual(inc.map((t) => t.file), ["src/new.py"]);
     const only = await scan({ cwd: repo, tags: ["FIXME"], files: ["src/old.ts"], now: NOW });
     assert.deepEqual(only.map((t) => t.tag), ["FIXME"]);
+    const both = await scan({ cwd: repo, tags: TAGS, files: ["src/old.ts", "src/new.py"], include: ["**/*.py"], now: NOW });
+    assert.deepEqual(both.map((t) => t.file), ["src/new.py"]);
+    assert.deepEqual(await scan({ cwd: repo, tags: TAGS, files: ["src/old.ts"], include: ["**/*.py"], now: NOW }), []);
     assert.deepEqual(await scan({ cwd: repo, tags: TAGS, files: [], now: NOW }), []);
   });
 
@@ -183,6 +190,81 @@ describe("in a git repository", () => {
 
   it("rejects bad inputs", async () => {
     await assert.rejects(run({ GITHUB_WORKSPACE: repo, INPUT_DAYS: "soon" }, { log: () => {} }), /"days" must be a number/);
+  });
+
+  it("handles CRLF files, non-ASCII paths, parens in links, subdir path and >100 TODOs in a file", async () => {
+    const subRepo = mkdtempSync(join(tmpdir(), "stale-todo-edge-"));
+    const subGit = (args: string[], date?: string) =>
+      execFileSync("git", args, {
+        cwd: subRepo,
+        encoding: "utf8",
+        env: { ...process.env, ...(date ? { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date } : {}) },
+      });
+    const subWrite = (path: string, text: string) => {
+      mkdirSync(dirname(join(subRepo, path)), { recursive: true });
+      writeFileSync(join(subRepo, path), text);
+    };
+    try {
+      subGit(["init", "-q", "-b", "main"]);
+      subWrite("pkg/src/win.cs", "// TODO: crlf todo\r\nconst string s = \"TODO\"; // TODO: after string\r\n");
+      subWrite("pkg/src/café.ts", "// TODO: unicode path\n");
+      subWrite("pkg/app/(auth)/login.ts", "// TODO: parens link\n");
+      subWrite("pkg/many.ts", Array.from({ length: 120 }, (_, i) => `// TODO: item ${i + 1}`).join("\n") + "\n");
+      subWrite("other/skip.ts", "// TODO: outside subdir\n");
+      subGit(["add", "-A"]);
+      subGit(["-c", "user.name=Ada", "-c", "user.email=ada@example.com", "commit", "-q", "-m", "base"], "2024-01-15T10:00:00Z");
+
+      const base = subGit(["rev-parse", "HEAD"]).trim();
+      subWrite("pkg/src/café.ts", "// TODO: unicode path\n// FIXME: added\n");
+      subWrite("other/skip.ts", "// TODO: changed outside subdir\n");
+      subGit(["add", "-A"]);
+      subGit(["-c", "user.name=Ada", "-c", "user.email=ada@example.com", "commit", "-q", "-m", "pr"], "2024-02-01T10:00:00Z");
+
+      const todos = await scan({ cwd: join(subRepo, "pkg"), tags: TAGS, now: NOW });
+      assert.equal(todos.length, 125);
+      assert.ok(todos.some((t) => t.file === "src/win.cs" && t.line === 1 && t.text === "crlf todo"));
+      assert.ok(todos.some((t) => t.file === "src/win.cs" && t.line === 2 && t.text === "after string"));
+
+      const event = join(subRepo, "event.json");
+      const outFile = join(subRepo, "out.txt");
+      writeFileSync(event, JSON.stringify({ pull_request: { base: { sha: base } } }));
+      writeFileSync(outFile, "");
+      const code = await run(
+        {
+          GITHUB_WORKSPACE: subRepo,
+          GITHUB_EVENT_PATH: event,
+          GITHUB_OUTPUT: outFile,
+          GITHUB_REPOSITORY: "acme/app",
+          GITHUB_SHA: "abc",
+          INPUT_PATH: "pkg",
+          "INPUT_ONLY-CHANGED": "true",
+          INPUT_DAYS: "0",
+        },
+        { log: () => {}, now: NOW },
+      );
+      assert.equal(code, 0);
+      const outputs = readFileSync(outFile, "utf8");
+      assert.match(outputs, /^total<<ghadelimiter_[\w-]+\n2\n/m);
+
+      // Verify parentheses are percent-encoded in Markdown links.
+      const outAll = join(subRepo, "out-all.txt");
+      writeFileSync(outAll, "");
+      await run(
+        {
+          GITHUB_WORKSPACE: join(subRepo, "pkg"),
+          GITHUB_OUTPUT: outAll,
+          GITHUB_REPOSITORY: "acme/app",
+          GITHUB_SHA: "abc",
+          INPUT_INCLUDE: "app/**",
+          INPUT_DAYS: "0",
+        },
+        { log: () => {}, now: NOW },
+      );
+      const md = readFileSync(outAll, "utf8");
+      assert.match(md, /\[app\/\(auth\)\/login\.ts:1\]\(https:\/\/github\.com\/acme\/app\/blob\/abc\/app\/%28auth%29\/login\.ts#L1\)/);
+    } finally {
+      rmSync(subRepo, { recursive: true, force: true });
+    }
   });
 });
 
